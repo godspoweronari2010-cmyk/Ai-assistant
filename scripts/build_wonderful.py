@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Build the Wonderful M3U from worldwide, public free-to-watch stream sources.
+"""Build Wonderful from public free-TV catalogues and curated directories.
 
-IPTV Cat is treated as a discovery source, not proof of distribution rights. Its
-entries are only added when the stream host matches the channel's own website or
-a broadcaster-operated delivery host, or when the exact URL is independently
-present in one of the curated public feeds below.
+Source-listed entries are labelled by their origin and verification/status.
+Unknown or offline status is not silently represented as verified working.
+Known denied hosts and NSFW entries are excluded.
 """
 from __future__ import annotations
 
@@ -33,6 +32,7 @@ SOURCES = [
     ("Free-TV/IPTV", "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u8", "curated"),
     ("FreeCastHub", "https://raw.githubusercontent.com/freecasthub/public-iptv/main/playlist.m3u", "curated"),
     ("LegalFreeIPTV", "https://biskyt.github.io/legalFreeIPTVplaylist/live.m3u", "curated"),
+    ("Doubo Public Directory", "https://cdn.jsdelivr.net/gh/streamline-iptv/iptv-playlists@dist/index.m3u", "curated"),
 ]
 CHANNELS_DB_URL = "https://iptv-org.github.io/api/channels.json"
 IPTVCAT_SITEMAP = "https://iptvcat.com/sitemap"
@@ -41,7 +41,7 @@ USER_AGENT = "Wonderful-IPTV-Playlist/1.0 (+https://github.com/godspoweronari201
 MAX_CAT_PAGES = 500
 REQUEST_DELAY = 0.05
 CAT_WORKERS = 8
-MINIMUM_OUTPUT_ENTRIES = 100
+MINIMUM_OUTPUT_ENTRIES = 30000
 
 HTTP_LOCAL = threading.local()
 
@@ -363,10 +363,9 @@ def export_iptvcat_page(sessionless_page_url: str) -> tuple[str, set[str]]:
     page_html = fetch_text(sessionless_page_url, timeout=45)
     status_parser = OnlineChannelParser()
     status_parser.feed(page_html)
-    online_names = {
-        normalized_name(name)
+    online_status = {
+        normalized_name(name): is_online
         for name, is_online in status_parser.items
-        if is_online
     }
     page_path = urlparse(sessionless_page_url).path
     # Mirrors IPTV Cat's public "Download this list" button:
@@ -385,7 +384,7 @@ def export_iptvcat_page(sessionless_page_url: str) -> tuple[str, set[str]]:
         raise RuntimeError("IPTV Cat country export did not return JSON")
     if not payload.get("status") or not isinstance(payload.get("data"), str):
         raise RuntimeError("IPTV Cat country export returned no playlist data")
-    return payload["data"], online_names
+    return payload["data"], online_status
 
 
 def main() -> int:
@@ -395,9 +394,9 @@ def main() -> int:
         "iptvcat_pages_seen": 0,
         "iptvcat_pages_exported": 0,
         "iptvcat_export_errors": [],
-        "iptvcat_entries_rejected_unverified": 0,
+        "iptvcat_entries_unverified": 0,
         "iptvcat_entries_accepted": 0,
-        "iptvcat_offline_entries_rejected": 0,
+        "iptvcat_offline_entries_retained": 0,
         "non_http_rejected": 0,
         "duplicate_same_channel_same_url": 0,
         "duplicate_url_other_name": 0,
@@ -422,17 +421,19 @@ def main() -> int:
         e.url for e in all_entries if e.trust == "curated"
     }
 
-    # Filter IPTV-org entries to broadcaster-owned domains or independently curated URLs.
+    # Keep the complete IPTV-org catalogue. Domain matching is retained as a
+    # provenance label, not used as a reason to discard public catalogue rows.
     verified_base: list[Entry] = []
-    counters["iptvorg_unverified_rejected"] = 0
+    counters["iptvorg_unverified_retained"] = 0
     for entry in all_entries:
         if entry.trust == "catalog":
             enrich_and_key(entry, channels_by_id, channels_by_name_country)
             if is_verified_catalog_entry(entry, channels_by_id, channels_by_name_country, nsfw_ids, curated_urls):
-                entry.trust = "officially-matched"
-                verified_base.append(entry)
+                entry.trust = "IPTV-org-officially-matched"
             else:
-                counters["iptvorg_unverified_rejected"] += 1
+                entry.trust = "IPTV-org-catalog-listed-unverified"
+                counters["iptvorg_unverified_retained"] += 1
+            verified_base.append(entry)
         else:
             verified_base.append(entry)
     all_entries = verified_base
@@ -468,18 +469,28 @@ def main() -> int:
         offline_count = 0
         unverified_count = 0
         try:
-            page_m3u, online_names = export_iptvcat_page(page_url)
+            page_m3u, online_status = export_iptvcat_page(page_url)
             parsed = parse_m3u(page_m3u, "IPTV Cat", "discovery")
             for entry in parsed:
                 enrich_and_key(entry, channels_by_id, channels_by_name_country)
-                if online_names and entry.name_key not in online_names:
+                listed_status = online_status.get(entry.name_key)
+                if listed_status is False:
                     offline_count += 1
-                    continue
-                if is_verified_catalog_entry(entry, channels_by_id, channels_by_name_country, nsfw_ids, curated_urls):
-                    entry.trust = "officially-matched"
-                    accepted.append(entry)
+                    availability = "offline-listed"
+                elif listed_status is True:
+                    availability = "online-listed"
                 else:
+                    availability = "status-unknown"
+                matched = is_verified_catalog_entry(
+                    entry, channels_by_id, channels_by_name_country,
+                    nsfw_ids, curated_urls
+                )
+                verification = "officially-matched" if matched else "unverified-source"
+                if not matched:
                     unverified_count += 1
+                entry.trust = f"IPTV-Cat-{availability}-{verification}"
+                # Retain the source row, but mark its availability accurately.
+                accepted.append(entry)
             return page_url, accepted, offline_count, unverified_count, None
         except Exception as exc:
             return page_url, [], offline_count, unverified_count, str(exc)[:250]
@@ -488,14 +499,14 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=CAT_WORKERS) as pool:
         for page_url, accepted, offline_count, unverified_count, error in pool.map(export_cat_page, selected_cat_pages):
             counters["iptvcat_pages_exported"] += 1 if error is None else 0
-            counters["iptvcat_offline_entries_rejected"] += offline_count
-            counters["iptvcat_entries_rejected_unverified"] += unverified_count
+            counters["iptvcat_offline_entries_retained"] += offline_count
+            counters["iptvcat_entries_unverified"] += unverified_count
             counters["iptvcat_entries_accepted"] += len(accepted)
             cat_entries.extend(accepted)
             if error:
                 counters["iptvcat_export_errors"].append({"page": page_url, "error": error})
     counters["iptvcat_pages_seen"] = len(expanded_pages)
-    counters["source_entries"]["IPTV Cat (verified entries)"] = len(cat_entries)
+    counters["source_entries"]["IPTV Cat (all exported entries)"] = len(cat_entries)
     all_entries.extend(cat_entries)
 
     # Enrich identity, reject non-HTTP(S), obvious denied hosts and NSFW groups.
@@ -518,9 +529,10 @@ def main() -> int:
             continue
         kept.append(entry)
 
-    # First pass: exact URL duplicates are removed. Different URLs for the same
-    # station remain, as requested. IPTV-org metadata is preferred when present.
-    source_rank = {"LegalFreeIPTV": 0, "Free-TV/IPTV": 1, "FreeCastHub": 2, "IPTV-org": 3, "IPTV Cat": 4}
+    # Exact duplicate URLs are removed globally; alternate URLs for one
+    # channel remain. Prefer carefully curated source metadata when the same
+    # URL appears more than once.
+    source_rank = {"LegalFreeIPTV": 0, "Free-TV/IPTV": 1, "Doubo Public Directory": 2, "FreeCastHub": 3, "IPTV-org": 4, "IPTV Cat": 5}
     kept.sort(key=lambda e: (source_rank.get(e.source, 9), e.country, e.name_key, e.url))
     deduped: list[Entry] = []
     seen_urls: set[str] = set()
@@ -554,13 +566,14 @@ def main() -> int:
     header = [
         "#EXTM3U",
         "# Wonderful IPTV playlist",
-        "# Sources: IPTV-org, IPTV Cat (officially matched entries), Free-TV/IPTV, FreeCastHub, LegalFreeIPTV",
-        "# Deduplication: exact stream URLs are listed once; distinct stream URLs for the same channel are retained.",
-        "# IPTV Cat entries are included only when the stream host can be matched to the broadcaster's own website/host or an independently curated free feed.",
+        "# Sources: IPTV-org, IPTV Cat, Free-TV/IPTV, FreeCastHub, LegalFreeIPTV, Doubo Public Directory",
+        "# Deduplication: each exact stream URL is listed once; distinct URLs for the same channel are retained.",
+        "# Source and verification/status comments identify catalogue-listed, officially matched, online-listed, offline-listed or unknown entries.",
     ]
     output_lines = list(header)
     for entry in deduped:
         output_lines.append(entry.extinf)
+        output_lines.append(f"#SOURCE: {entry.source} | VERIFICATION/STATUS: {entry.trust}")
         output_lines.extend(entry.tags)
         output_lines.append(entry.url)
     OUT.write_text("\n".join(output_lines) + "\n", encoding="utf-8")
@@ -570,8 +583,9 @@ def main() -> int:
     counters["generated_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     counters["output_bytes"] = OUT.stat().st_size
     counters["source_notes"] = {
-        "IPTV-org": "Only streams tied to a broadcaster-owned website/host or an independently curated free feed are retained.",
-        "IPTV Cat": "Public aggregation used as discovery; only independently matched official/free stream URLs are retained.",
+        "IPTV-org": "Complete HTTP/HTTPS source catalogue retained except NSFW/blocked/denied-host entries; broadcaster-domain matches are labelled.",
+        "IPTV Cat": "Exported HTTP/HTTPS rows retained except NSFW/blocked/denied-host entries; online/offline/unknown status and domain-match labels are included.",
+        "Doubo Public Directory": "Separate directory advertised as broadcaster-provided free public streams; availability and regional restrictions can change.",
         "Free-TV/IPTV": "Curated free-TV source; subject to broadcaster and geographic restrictions.",
         "FreeCastHub": "Curated free public-broadcaster source.",
         "LegalFreeIPTV": "Curated legal-free feed with published acceptance criteria.",
