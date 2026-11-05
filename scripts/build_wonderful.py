@@ -13,6 +13,8 @@ import json
 import re
 import sys
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import unicodedata
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -37,10 +39,18 @@ IPTVCAT_SITEMAP = "https://iptvcat.com/sitemap"
 IPTVCAT_EXPORT = "https://iptvcat.com/ajax/streams_a?action=playlist_download"
 USER_AGENT = "Wonderful-IPTV-Playlist/1.0 (+https://github.com/godspoweronari2010-cmyk/Ai-assistant)"
 MAX_CAT_PAGES = 500
-REQUEST_DELAY = 0.35
+REQUEST_DELAY = 0.05
+CAT_WORKERS = 8
 MINIMUM_OUTPUT_ENTRIES = 100
 
-HTTP_OPENER = build_opener(HTTPCookieProcessor(CookieJar()))
+HTTP_LOCAL = threading.local()
+
+def get_http_opener():
+    opener = getattr(HTTP_LOCAL, "opener", None)
+    if opener is None:
+        opener = build_opener(HTTPCookieProcessor(CookieJar()))
+        HTTP_LOCAL.opener = opener
+    return opener
 
 BROADCASTER_HOSTS = {
     "getaj.net", "thehlive.com", "rtve.es", "nhkworld.jp", "trt.com.tr", "ard-mcdn.de",
@@ -87,7 +97,7 @@ def fetch(url: str, *, method: str = "GET", body: str | None = None,
     for attempt in range(attempts):
         try:
             req = Request(url, data=data, headers=headers, method=method)
-            with HTTP_OPENER.open(req, timeout=timeout) as response:
+            with get_http_opener().open(req, timeout=timeout) as response:
                 return response.read()
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
             last_error = exc
@@ -415,36 +425,53 @@ def main() -> int:
         print(f"WARNING: IPTV Cat sitemap unavailable: {exc}", file=sys.stderr)
 
     expanded_pages: set[str] = set()
-    for page_url in cat_pages:
-        if len(expanded_pages) >= MAX_CAT_PAGES:
-            break
+    def expand_cat_page(page_url: str):
         try:
             page_html = fetch_text(page_url, timeout=45)
-            expanded_pages.update(page_and_pagination_urls(page_url, page_html))
+            return page_url, page_and_pagination_urls(page_url, page_html), None
         except Exception as exc:
-            counters["iptvcat_export_errors"].append({"page": page_url, "error": str(exc)[:250]})
-        time.sleep(REQUEST_DELAY)
+            return page_url, [], str(exc)[:250]
+
+    # Bounded parallelism prevents hundreds of country pages from serializing
+    # into a multi-hour build while avoiding an excessive burst at IPTV Cat.
+    with ThreadPoolExecutor(max_workers=CAT_WORKERS) as pool:
+        for page_url, page_results, error in pool.map(expand_cat_page, cat_pages):
+            expanded_pages.update(page_results)
+            if error:
+                counters["iptvcat_export_errors"].append({"page": page_url, "error": error})
 
     cat_entries: list[Entry] = []
-    for page_url in sorted(expanded_pages)[:MAX_CAT_PAGES]:
+    def export_cat_page(page_url: str):
+        accepted: list[Entry] = []
+        offline_count = 0
+        unverified_count = 0
         try:
             page_m3u, online_names = export_iptvcat_page(page_url)
             parsed = parse_m3u(page_m3u, "IPTV Cat", "discovery")
-            counters["iptvcat_pages_exported"] += 1
             for entry in parsed:
                 enrich_and_key(entry, channels_by_id, channels_by_name_country)
                 if online_names and entry.name_key not in online_names:
-                    counters["iptvcat_offline_entries_rejected"] += 1
+                    offline_count += 1
                     continue
                 if is_verified_catalog_entry(entry, channels_by_id, channels_by_name_country, nsfw_ids, curated_urls):
                     entry.trust = "officially-matched"
-                    cat_entries.append(entry)
-                    counters["iptvcat_entries_accepted"] += 1
+                    accepted.append(entry)
                 else:
-                    counters["iptvcat_entries_rejected_unverified"] += 1
+                    unverified_count += 1
+            return page_url, accepted, offline_count, unverified_count, None
         except Exception as exc:
-            counters["iptvcat_export_errors"].append({"page": page_url, "error": str(exc)[:250]})
-        time.sleep(REQUEST_DELAY)
+            return page_url, [], offline_count, unverified_count, str(exc)[:250]
+
+    selected_cat_pages = sorted(expanded_pages)[:MAX_CAT_PAGES]
+    with ThreadPoolExecutor(max_workers=CAT_WORKERS) as pool:
+        for page_url, accepted, offline_count, unverified_count, error in pool.map(export_cat_page, selected_cat_pages):
+            counters["iptvcat_pages_exported"] += 1 if error is None else 0
+            counters["iptvcat_offline_entries_rejected"] += offline_count
+            counters["iptvcat_entries_rejected_unverified"] += unverified_count
+            counters["iptvcat_entries_accepted"] += len(accepted)
+            cat_entries.extend(accepted)
+            if error:
+                counters["iptvcat_export_errors"].append({"page": page_url, "error": error})
     counters["iptvcat_pages_seen"] = len(expanded_pages)
     counters["source_entries"]["IPTV Cat (verified entries)"] = len(cat_entries)
     all_entries.extend(cat_entries)
