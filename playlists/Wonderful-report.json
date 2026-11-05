@@ -4,7 +4,7 @@
     "Free-TV/IPTV": 2055,
     "FreeCastHub": 108,
     "LegalFreeIPTV": 1466,
-    "IPTV Cat (verified entries)": 1690
+    "IPTV Cat (verified entries)": 1150
   },
   "iptvcat_pages_seen": 384,
   "iptvcat_pages_exported": 313,
@@ -294,17 +294,17 @@
       "error": "IPTV Cat country export returned no playlist data"
     }
   ],
-  "iptvcat_entries_rejected_unverified": 16038,
-  "iptvcat_entries_accepted": 1690,
-  "iptvcat_offline_entries_rejected": 0,
+  "iptvcat_entries_rejected_unverified": 12329,
+  "iptvcat_entries_accepted": 1150,
+  "iptvcat_offline_entries_rejected": 4249,
   "non_http_rejected": 0,
   "duplicate_same_channel_same_url": 0,
-  "duplicate_url_other_name": 3529,
+  "duplicate_url_other_name": 2991,
   "iptvorg_unverified_rejected": 9394,
-  "final_channels_or_streams": 3785,
-  "unique_channel_identities": 3483,
-  "generated_utc": "2026-11-05T05:24:04Z",
-  "output_bytes": 1008980,
+  "final_channels_or_streams": 3783,
+  "unique_channel_identities": 3481,
+  "generated_utc": "2026-11-05T05:28:40Z",
+  "output_bytes": 1008615,
   "source_notes": {
     "IPTV-org": "Only streams tied to a broadcaster-owned website/host or an independently curated free feed are retained.",
     "IPTV Cat": "Public aggregation used as discovery; only independently matched official/free stream URLs are retained.",

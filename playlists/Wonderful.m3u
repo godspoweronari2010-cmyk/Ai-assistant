@@ -5291,8 +5291,6 @@ https://live.cltv36.tv:5443/LiveApp/streams/cltvlive.m3u8
 https://cdn.vegasplus.us/vegas/lac/playlist.m3u8
 #EXTINF:0 tvg-country="PH" tvg-logo="https://i.imgur.com/IUcTFQ2.png" group-title="Undefined",CLTV 36 (1080p) [Not 24/7]
 https://live.cltv36.tv:5443/LiveApp/streams/live.m3u8
-#EXTINF:0 tvg-country="PK" tvg-logo="" group-title="PAKISTAN",Dunya News (480p) [Not 24/7]
-https://imob.dunyanews.tv/livehd/_definst_/ngrp:dunyalivehd_2_all/playlist.m3u8
 #EXTINF:-1 tvg-id="JeremiahTV.pk@SD" tvg-name="Jeremiah TV" tvg-logo="https://raw.githubusercontent.com/songwenhui239/Songwenhui239/refs/heads/main/Jeremiah%20TV.jpeg" tvg-country="PK" tvg-language="Urdu" group-title="PK | General",Jeremiah TV
 https://x.streamablecloud.com/stream/hls/jeremiahtv/index.m3u8
 #EXTINF:-1 tvg-id="ZindagiTV.pk@SD" tvg-name="Zindagi TV" tvg-logo="https://i.imgur.com/XBHvR5J.png" tvg-country="PK" tvg-language="Urdu" group-title="PK | General",Zindagi TV
@@ -5716,8 +5714,6 @@ https://rt-glb.rttv.com/live/rtnews/playlist.m3u8
 https://rt-arb.rttv.com/dvr/rtarab/playlist.m3u8
 #EXTINF:-1 tvg-name="RT Español" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/thumb/a/a0/Russia-today-logo.svg/500px-Russia-today-logo.svg.png" tvg-id="RTenEspanol.ru" tvg-chno="5" group-title="News (ES)",RT Español Ⓖ
 https://rt-esp.rttv.com/dvr/rtesp/playlist.m3u8
-#EXTINF:0 tvg-country="RU" tvg-logo="http://kab.tv/static/images/kab_tv_eng.gif" group-title="Religious",Каббала ТВ
-http://edge2.uk.kab.tv/rtplive/kabtv-rus-medium.stream/playlist.m3u8
 #EXTINF:-1 tvg-id="RBKTV.ru@SD" tvg-name="RBK-TV" tvg-logo="https://i.imgur.com/CwhmJby.png" tvg-country="RU" tvg-language="Russian" group-title="RU | Business",RBK-TV
 https://online-video.rbc.ru/spb/rbctv_spb.m3u8
 #EXTINF:-1 tvg-id="86.ru@SD" tvg-name="86" tvg-logo="https://i.imgur.com/0dRS4Cb.png" tvg-country="RU" tvg-language="Russian" group-title="RU | General",86
