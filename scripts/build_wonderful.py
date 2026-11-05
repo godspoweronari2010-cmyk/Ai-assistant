@@ -19,7 +19,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
+from http.cookiejar import CookieJar
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "playlists" / "Wonderful.m3u"
@@ -38,6 +39,8 @@ USER_AGENT = "Wonderful-IPTV-Playlist/1.0 (+https://github.com/godspoweronari201
 MAX_CAT_PAGES = 500
 REQUEST_DELAY = 0.35
 MINIMUM_OUTPUT_ENTRIES = 100
+
+HTTP_OPENER = build_opener(HTTPCookieProcessor(CookieJar()))
 
 BROADCASTER_HOSTS = {
     "getaj.net", "thehlive.com", "rtve.es", "nhkworld.jp", "trt.com.tr", "ard-mcdn.de",
@@ -84,7 +87,7 @@ def fetch(url: str, *, method: str = "GET", body: str | None = None,
     for attempt in range(attempts):
         try:
             req = Request(url, data=data, headers=headers, method=method)
-            with urlopen(req, timeout=timeout) as response:
+            with HTTP_OPENER.open(req, timeout=timeout) as response:
                 return response.read()
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
             last_error = exc
@@ -210,15 +213,19 @@ def host_matches(host: str, domain: str) -> bool:
     return bool(host and domain and (host == domain or host.endswith("." + domain)))
 
 
-def load_channel_database() -> tuple[dict[str, set[str]], dict[tuple[str, str], set[str]]]:
+def load_channel_database() -> tuple[dict[str, set[str]], dict[tuple[str, str], set[str]], set[str]]:
     by_id: dict[str, set[str]] = {}
     by_name_country: dict[tuple[str, str], set[str]] = {}
+    nsfw_ids: set[str] = set()
     try:
         data = json.loads(fetch_text(CHANNELS_DB_URL, timeout=60))
     except Exception as exc:
         print(f"WARNING: channel database unavailable: {exc}", file=sys.stderr)
-        return by_id, by_name_country
+        return by_id, by_name_country, nsfw_ids
     for channel in data if isinstance(data, list) else []:
+        cid_raw = str(channel.get("id") or "").split("@", 1)[0]
+        if channel.get("is_nsfw") and cid_raw:
+            nsfw_ids.add(cid_raw.casefold())
         website = channel.get("website") or ""
         domain = host_of(website)
         if not domain:
@@ -232,7 +239,7 @@ def load_channel_database() -> tuple[dict[str, set[str]], dict[tuple[str, str], 
             nkey = normalized_name(str(name))
             if nkey:
                 by_name_country.setdefault((nkey, country), set()).add(domain)
-    return by_id, by_name_country
+    return by_id, by_name_country, nsfw_ids
 
 
 def enrich_and_key(entry: Entry, by_id, by_name_country) -> None:
@@ -251,7 +258,7 @@ def enrich_and_key(entry: Entry, by_id, by_name_country) -> None:
         entry.channel_key = f"name:{country}:{entry.name_key}"
 
 
-def is_official_cat_entry(entry: Entry, by_id, by_name_country, curated_urls: set[str]) -> bool:
+def is_verified_catalog_entry(entry: Entry, by_id, by_name_country, nsfw_ids: set[str], curated_urls: set[str]) -> bool:
     if entry.url in curated_urls:
         return True
     host = host_of(entry.url)
@@ -261,6 +268,8 @@ def is_official_cat_entry(entry: Entry, by_id, by_name_country, curated_urls: se
         return True
     attrs = attributes(entry.extinf)
     channel_id = attrs.get("tvg-id", "").split("@", 1)[0].casefold()
+    if channel_id and channel_id in nsfw_ids:
+        return False
     domains = set(by_id.get(channel_id, set())) if channel_id else set()
     if not domains:
         country = entry.country
@@ -363,10 +372,26 @@ def main() -> int:
             counters["source_entries"][name] = 0
             print(f"WARNING: {name} unavailable: {exc}", file=sys.stderr)
 
-    channels_by_id, channels_by_name_country = load_channel_database()
+    channels_by_id, channels_by_name_country, nsfw_ids = load_channel_database()
     curated_urls = {
         e.url for e in all_entries if e.trust == "curated"
     }
+
+    # Filter IPTV-org entries to broadcaster-owned domains or independently curated URLs.
+    verified_base: list[Entry] = []
+    counters["iptvorg_unverified_rejected"] = 0
+    for entry in all_entries:
+        if entry.trust == "catalog":
+            enrich_and_key(entry, channels_by_id, channels_by_name_country)
+            if is_verified_catalog_entry(entry, channels_by_id, channels_by_name_country, nsfw_ids, curated_urls):
+                entry.trust = "officially-matched"
+                verified_base.append(entry)
+            else:
+                counters["iptvorg_unverified_rejected"] += 1
+        else:
+            verified_base.append(entry)
+    all_entries = verified_base
+    curated_urls = {e.url for e in all_entries if e.trust == "curated"}
 
     # IPTV Cat: use its country/region sitemap and native one-page M3U export.
     # The page list is re-discovered at each run, so new countries are picked up.
@@ -395,7 +420,7 @@ def main() -> int:
             counters["iptvcat_pages_exported"] += 1
             for entry in parsed:
                 enrich_and_key(entry, channels_by_id, channels_by_name_country)
-                if is_official_cat_entry(entry, channels_by_id, channels_by_name_country, curated_urls):
+                if is_verified_catalog_entry(entry, channels_by_id, channels_by_name_country, nsfw_ids, curated_urls):
                     entry.trust = "officially-matched"
                     cat_entries.append(entry)
                     counters["iptvcat_entries_accepted"] += 1
@@ -477,7 +502,7 @@ def main() -> int:
     counters["generated_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     counters["output_bytes"] = OUT.stat().st_size
     counters["source_notes"] = {
-        "IPTV-org": "Publicly available streams; entries are filtered by broadcaster-host evidence or a curated feed.",
+        "IPTV-org": "Only streams tied to a broadcaster-owned website/host or an independently curated free feed are retained.",
         "IPTV Cat": "Public aggregation used as discovery; only independently matched official/free stream URLs are retained.",
         "Free-TV/IPTV": "Curated free-TV source; subject to broadcaster and geographic restrictions.",
         "FreeCastHub": "Curated free public-broadcaster source.",
