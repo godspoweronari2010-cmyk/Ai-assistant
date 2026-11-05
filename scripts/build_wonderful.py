@@ -214,6 +214,30 @@ class LinkParser(HTMLParser):
             self._text = []
 
 
+class OnlineChannelParser(HTMLParser):
+    """Parse IPTV Cat's channel rows without parsing markup embedded in data-content attributes."""
+    def __init__(self) -> None:
+        super().__init__()
+        self.current_name: str | None = None
+        self.current_online = False
+        self.items: list[tuple[str, bool]] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        values = dict(attrs)
+        classes = (values.get("class") or "").split()
+        if tag.lower() == "span" and "channel_name" in classes:
+            self.current_name = values.get("title") or None
+            self.current_online = False
+        elif self.current_name and tag.lower() == "div" and "state" in classes and "online" in classes:
+            self.current_online = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "tr" and self.current_name:
+            self.items.append((self.current_name, self.current_online))
+            self.current_name = None
+            self.current_online = False
+
+
 def host_of(url: str) -> str:
     try:
         return (urlparse(url).hostname or "").lower().strip(".")
@@ -337,15 +361,13 @@ def page_and_pagination_urls(page_url: str, page_html: str) -> list[str]:
 
 def export_iptvcat_page(sessionless_page_url: str) -> tuple[str, set[str]]:
     page_html = fetch_text(sessionless_page_url, timeout=45)
-    online_names: set[str] = set()
-    # IPTV Cat exports offline rows too. Keep a country-page stream only when
-    # the matching channel row is marked online by IPTV Cat's daily checker.
-    row_pattern = re.compile(r"""<tr\b[^>]*\bbelongs_to_\d+[^>]*>(.*?)</tr>""", re.IGNORECASE | re.DOTALL)
-    for row in row_pattern.findall(page_html):
-        title_match = re.search(r"""data-original-title=["']([^"']+)["']""", row, re.IGNORECASE)
-        online_match = re.search(r"""<div\s+class=["']state\s+online["']""", row, re.IGNORECASE)
-        if title_match and online_match:
-            online_names.add(normalized_name(html.unescape(title_match.group(1))))
+    status_parser = OnlineChannelParser()
+    status_parser.feed(page_html)
+    online_names = {
+        normalized_name(name)
+        for name, is_online in status_parser.items
+        if is_online
+    }
     page_path = urlparse(sessionless_page_url).path
     # Mirrors IPTV Cat's public "Download this list" button:
     # POST /ajax/streams_a?action=playlist_download with the page path as body.
