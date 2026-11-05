@@ -1,6 +1,11 @@
 name: Build Wonderful IPTV playlist
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/build_wonderful.py'
+      - '.github/workflows/build-wonderful.yml'
   workflow_dispatch:
   schedule:
     - cron: "0 4 * * *"
