@@ -330,10 +330,10 @@ def export_iptvcat_page(sessionless_page_url: str) -> tuple[str, set[str]]:
     online_names: set[str] = set()
     # IPTV Cat exports offline rows too. Keep a country-page stream only when
     # the matching channel row is marked online by IPTV Cat's daily checker.
-    row_pattern = re.compile(r'<tr\\b[^>]*\\bbelongs_to_\\d+[^>]*>(.*?)</tr>', re.IGNORECASE | re.DOTALL)
+    row_pattern = re.compile(r"""<tr\b[^>]*\bbelongs_to_\d+[^>]*>(.*?)</tr>""", re.IGNORECASE | re.DOTALL)
     for row in row_pattern.findall(page_html):
-        title_match = re.search(r'data-original-title=["\\']([^"\\']+)["\\']', row, re.IGNORECASE)
-        online_match = re.search(r'<div\\s+class=["\\']state\\s+online["\\']', row, re.IGNORECASE)
+        title_match = re.search(r"""data-original-title=["']([^"']+)["']""", row, re.IGNORECASE)
+        online_match = re.search(r"""<div\s+class=["']state\s+online["']""", row, re.IGNORECASE)
         if title_match and online_match:
             online_names.add(normalized_name(html.unescape(title_match.group(1))))
     page_path = urlparse(sessionless_page_url).path
