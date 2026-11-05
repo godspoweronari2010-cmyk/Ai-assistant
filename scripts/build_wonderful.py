@@ -137,9 +137,12 @@ def normalized_url(url: str) -> str:
         return ""
     # Keep the original path and query: signed URLs and alternate stream paths
     # may represent distinct feeds. Normalize only URL casing and fragments.
+    query = parsed.query
+    if query.casefold() in ("checkedby:iptvcat.com", "checkedby=iptvcat.com"):
+        query = ""
     return urlunparse((
         parsed.scheme.lower(), parsed.netloc.lower(), parsed.path or "/",
-        parsed.params, parsed.query, ""
+        parsed.params, query, ""
     ))
 
 
@@ -322,8 +325,17 @@ def page_and_pagination_urls(page_url: str, page_html: str) -> list[str]:
     return sorted(result)
 
 
-def export_iptvcat_page(sessionless_page_url: str) -> str:
+def export_iptvcat_page(sessionless_page_url: str) -> tuple[str, set[str]]:
     page_html = fetch_text(sessionless_page_url, timeout=45)
+    online_names: set[str] = set()
+    # IPTV Cat exports offline rows too. Keep a country-page stream only when
+    # the matching channel row is marked online by IPTV Cat's daily checker.
+    row_pattern = re.compile(r'<tr\\b[^>]*\\bbelongs_to_\\d+[^>]*>(.*?)</tr>', re.IGNORECASE | re.DOTALL)
+    for row in row_pattern.findall(page_html):
+        title_match = re.search(r'data-original-title=["\\']([^"\\']+)["\\']', row, re.IGNORECASE)
+        online_match = re.search(r'<div\\s+class=["\\']state\\s+online["\\']', row, re.IGNORECASE)
+        if title_match and online_match:
+            online_names.add(normalized_name(html.unescape(title_match.group(1))))
     page_path = urlparse(sessionless_page_url).path
     # Mirrors IPTV Cat's public "Download this list" button:
     # POST /ajax/streams_a?action=playlist_download with the page path as body.
@@ -341,7 +353,7 @@ def export_iptvcat_page(sessionless_page_url: str) -> str:
         raise RuntimeError("IPTV Cat country export did not return JSON")
     if not payload.get("status") or not isinstance(payload.get("data"), str):
         raise RuntimeError("IPTV Cat country export returned no playlist data")
-    return payload["data"]
+    return payload["data"], online_names
 
 
 def main() -> int:
@@ -353,6 +365,7 @@ def main() -> int:
         "iptvcat_export_errors": [],
         "iptvcat_entries_rejected_unverified": 0,
         "iptvcat_entries_accepted": 0,
+        "iptvcat_offline_entries_rejected": 0,
         "non_http_rejected": 0,
         "duplicate_same_channel_same_url": 0,
         "duplicate_url_other_name": 0,
@@ -415,11 +428,14 @@ def main() -> int:
     cat_entries: list[Entry] = []
     for page_url in sorted(expanded_pages)[:MAX_CAT_PAGES]:
         try:
-            page_m3u = export_iptvcat_page(page_url)
+            page_m3u, online_names = export_iptvcat_page(page_url)
             parsed = parse_m3u(page_m3u, "IPTV Cat", "discovery")
             counters["iptvcat_pages_exported"] += 1
             for entry in parsed:
                 enrich_and_key(entry, channels_by_id, channels_by_name_country)
+                if online_names and entry.name_key not in online_names:
+                    counters["iptvcat_offline_entries_rejected"] += 1
+                    continue
                 if is_verified_catalog_entry(entry, channels_by_id, channels_by_name_country, nsfw_ids, curated_urls):
                     entry.trust = "officially-matched"
                     cat_entries.append(entry)
@@ -440,6 +456,9 @@ def main() -> int:
             counters["non_http_rejected"] += 1
             continue
         attrs = attributes(entry.extinf)
+        channel_id = attrs.get("tvg-id", "").split("@", 1)[0].casefold()
+        if channel_id and channel_id in nsfw_ids:
+            continue
         group = attrs.get("group-title", "").casefold()
         title = entry.name.casefold()
         if any(term in group or term in title for term in BLOCKED_EXTINF):
